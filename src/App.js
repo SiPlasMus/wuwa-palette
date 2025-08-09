@@ -10,6 +10,8 @@ import "./App.css";
 
 const MOVES_BY_DIFF = { easy: 3, medium: 4, hard: 5 };
 const BLOCKER = -1;
+const MAX_ATTEMPTS = 250; // сколько раз пробуем сгенерить и проверить
+
 
 const PALETTE = [
     { id: 1, name: "blue",   hex: "#3E82C4" },
@@ -140,23 +142,178 @@ export default function App() {
         return { grid: g, goal: TARGET };
     }
 
-    function newGame(diff = difficulty, R = rows, C = cols) {
+    // Случайная доска с лёгким уклоном в один цвет (повышает решаемость)
+    function randomGrid(diff, R, C) {
+        const blockersPct = diff === "hard" ? 0.08 : 0;
+        const biasColor = (Math.random() * PALETTE.length) | 0;
+        const biasPct = 0.55;
 
+        const g = Array.from({ length: R }, () =>
+            Array.from({ length: C }, () => {
+                if (Math.random() < blockersPct) return BLOCKER;
+                if (Math.random() < biasPct) return biasColor;
+                return (Math.random() * PALETTE.length) | 0;
+            })
+        );
+
+        // центр не должен быть блокером (приятнее играть)
+        const cr = Math.floor(R / 2), cc = Math.floor(C / 2);
+        if (g[cr][cc] === BLOCKER) g[cr][cc] = biasColor;
+        return g;
+    }
+
+    function majorityColorOfGrid(g) {
+        const freq = new Map();
+        for (const v of g.flat()) if (v !== BLOCKER) freq.set(v, (freq.get(v) || 0) + 1);
+        let best = -1, color = 0;
+        for (const [k, v] of freq) if (v > best) { best = v; color = k; }
+        return color;
+    }
+
+// центры компонент — кандидаты-«ориджины» для клика
+    function regionSeeds(g, R, C) {
+        const seeds = [];
+        const seen = Array.from({ length: R }, () => Array(C).fill(false));
+        for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+            if (seen[r][c] || g[r][c] === BLOCKER) continue;
+            const color = g[r][c];
+            const q = [[r, c]]; seen[r][c] = true;
+            let cnt = 0, sr = 0, sc = 0;
+            while (q.length) {
+                const [rr, cc] = q.shift(); cnt++; sr += rr; sc += cc;
+                for (const [nr, nc] of [[rr-1,cc],[rr+1,cc],[rr,cc-1],[rr,cc+1]]) {
+                    if (nr<0||nr>=R||nc<0||nc>=C) continue;
+                    if (seen[nr][nc]) continue;
+                    if (g[nr][nc] === color) { seen[nr][nc] = true; q.push([nr, nc]); }
+                }
+            }
+            seeds.push({ r: Math.round(sr / cnt), c: Math.round(sc / cnt) });
+        }
+        return seeds;
+    }
+
+    function connectedSize(g, color, R, C) {
+        const seen = Array.from({ length: R }, () => Array(C).fill(false));
+        let best = 0;
+        for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+            if (seen[r][c] || g[r][c] !== color) continue;
+            let cnt = 0; const q = [[r, c]]; seen[r][c] = true;
+            while (q.length) {
+                const [rr, cc] = q.shift(); cnt++;
+                for (const [nr,nc] of [[rr-1,cc],[rr+1,cc],[rr,cc-1],[rr,cc+1]]) {
+                    if (nr<0||nr>=R||nc<0||nc>=C) continue;
+                    if (seen[nr][nc]) continue;
+                    if (g[nr][nc] === color) { seen[nr][nc] = true; q.push([nr,nc]); }
+                }
+            }
+            if (cnt > best) best = cnt;
+        }
+        return best;
+    }
+
+// нижняя оценка: количество компонент «нецелевого» цвета
+    function nonTargetComponents(g, target, R, C) {
+        const seen = Array.from({ length: R }, () => Array(C).fill(false));
+        let comps = 0;
+        for (let r=0;r<R;r++) for (let c=0;c<C;c++) {
+            if (seen[r][c] || g[r][c] === BLOCKER || g[r][c] === target) continue;
+            const clr = g[r][c]; comps++;
+            const q = [[r,c]]; seen[r][c] = true;
+            while (q.length) {
+                const [rr,cc] = q.shift();
+                for (const [nr,nc] of [[rr-1,cc],[rr+1,cc],[rr,cc-1],[rr,cc+1]]) {
+                    if (nr<0||nr>=R||nc<0||nc>=C) continue;
+                    if (seen[nr][nc]) continue;
+                    if (g[nr][nc] === clr) { seen[nr][nc] = true; q.push([nr,nc]); }
+                }
+            }
+        }
+        return comps;
+    }
+
+    function serialize(g){ return g.map(r=>r.join(",")).join("|"); }
+
+// Поиск решения ≤ k ходов (итеративный DFS с отсечениями)
+    function isSolvableToward(start, target, maxDepth, R, C, simulateFlood) {
+        const seen = new Set();
+        const startKey = serialize(start);
+        function dfs(state, depth) {
+            if (depth > maxDepth) return false;
+            if (nonTargetComponents(state, target, R, C) > (maxDepth - depth)) return false;
+            if (state === true) return false; // guard
+            if (state && isUniformTo(state, target)) return true;
+
+            const key = serialize(state) + "|" + depth;
+            if (seen.has(key)) return false;
+            seen.add(key);
+
+            const seeds = regionSeeds(state, R, C);
+            const moves = [];
+            for (const { r, c } of seeds) {
+                const base = state[r][c];
+                if (base === BLOCKER) continue;
+                for (let color = 0; color < PALETTE.length; color++) {
+                    if (color === base) continue;
+                    const { grid: ng } = simulateFlood(state, r, c, color, R, C);
+                    if (serialize(ng) === serialize(state)) continue;
+                    const gain = connectedSize(ng, target, R, C);
+                    moves.push({ ng, gain });
+                }
+            }
+            // жадно пробуем ходы, которые сильнее наращивают компоненту target
+            moves.sort((a,b)=>b.gain - a.gain);
+            for (const m of moves.slice(0, 18)) {
+                if (dfs(m.ng, depth + 1)) return true;
+            }
+            return false;
+        }
+        return dfs(start, 0);
+    }
+
+
+    function newGame(diff = difficulty, R = rows, C = cols) {
         setIsGenerating(true);
-        setTimeout(() => {
-            const k = MOVES_BY_DIFF[diff];
-            const { grid: g, goal } = generatePuzzleConstructive(diff, R, C, k);
-            setSeedGrid(g.map(r=>r.slice()));
-            setGrid(g);
-            setGoalColor(goal);
-            setMovesLeft(k);
-            setIsWon(false);
-            setSelectedColorIdx(null);
-            setOrigin([Math.floor(R/2), Math.floor(C/2)]);
-            setChangedThisMove(new Set());
-            setWaveSeed(s=>s+1);
-            setIsGenerating(false);
-        }, 0);
+        const k = MOVES_BY_DIFF[diff];
+        let attempts = 0;
+
+        const tryOnce = () => {
+            attempts++;
+            const g = randomGrid(diff, R, C);
+            const goal = majorityColorOfGrid(g);
+
+            if (isSolvableToward(g, goal, k, R, C, simulateFlood)) {
+                setSeedGrid(g.map(r => r.slice()));
+                setGrid(g);
+                setGoalColor(goal);
+                setMovesLeft(k);
+                setIsWon(false);
+                setSelectedColorIdx(null);
+                setOrigin([Math.floor(R/2), Math.floor(C/2)]);
+                setChangedThisMove(new Set());
+                setWaveSeed(s => s + 1);
+                setIsGenerating(false);
+                return;
+            }
+
+            if (attempts < MAX_ATTEMPTS) {
+                // уступаем потоку рендера, чтобы не «висеть»
+                setTimeout(tryOnce, 0);
+            } else {
+                // fallback — очень редко; всё равно стартуем игру
+                setSeedGrid(g.map(r => r.slice()));
+                setGrid(g);
+                setGoalColor(goal);
+                setMovesLeft(k);
+                setIsWon(false);
+                setSelectedColorIdx(null);
+                setOrigin([Math.floor(R/2), Math.floor(C/2)]);
+                setChangedThisMove(new Set());
+                setWaveSeed(s => s + 1);
+                setIsGenerating(false);
+            }
+        };
+
+        setTimeout(tryOnce, 0);
     }
 
     // -------- gameplay --------
