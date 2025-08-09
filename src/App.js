@@ -146,7 +146,7 @@ export default function App() {
     function randomGrid(diff, R, C) {
         const blockersPct = diff === "hard" ? 0.08 : 0;
         const biasColor = (Math.random() * PALETTE.length) | 0;
-        const biasPct = 0.55;
+        const biasPct = 0.62;
 
         const g = Array.from({ length: R }, () =>
             Array.from({ length: C }, () => {
@@ -236,12 +236,10 @@ export default function App() {
 // Поиск решения ≤ k ходов (итеративный DFS с отсечениями)
     function isSolvableToward(start, target, maxDepth, R, C, simulateFlood) {
         const seen = new Set();
-        const startKey = serialize(start);
+
         function dfs(state, depth) {
             if (depth > maxDepth) return false;
-            if (nonTargetComponents(state, target, R, C) > (maxDepth - depth)) return false;
-            if (state === true) return false; // guard
-            if (state && isUniformTo(state, target)) return true;
+            if (isUniformTo(state, target)) return true;
 
             const key = serialize(state) + "|" + depth;
             if (seen.has(key)) return false;
@@ -256,18 +254,80 @@ export default function App() {
                     if (color === base) continue;
                     const { grid: ng } = simulateFlood(state, r, c, color, R, C);
                     if (serialize(ng) === serialize(state)) continue;
+
+                    // score: size of largest target blob (greedy guidance)
                     const gain = connectedSize(ng, target, R, C);
                     moves.push({ ng, gain });
                 }
             }
-            // жадно пробуем ходы, которые сильнее наращивают компоненту target
-            moves.sort((a,b)=>b.gain - a.gain);
-            for (const m of moves.slice(0, 18)) {
+
+            // try only the best few moves to cap branching
+            moves.sort((a, b) => b.gain - a.gain);
+            for (const m of moves.slice(0, 16)) {
                 if (dfs(m.ng, depth + 1)) return true;
             }
             return false;
         }
+
         return dfs(start, 0);
+    }
+
+
+    function isSolvableExact(start, target, k, R, C, simulateFlood) {
+        if (!isSolvableToward(start, target, k, R, C, simulateFlood)) return false;
+        if (k > 0 && isSolvableToward(start, target, k - 1, R, C, simulateFlood)) return false;
+        return true;
+    }
+
+
+    function pickTargetForBoard(g, k, R, C, simulateFlood) {
+        let fallback = null;
+        for (let color = 0; color < PALETTE.length; color++) {
+            // сначала пытаемся найти ровно k
+            if (isSolvableExact(g, color, k, R, C, simulateFlood)) {
+                return { target: color, exact: true };
+            }
+            // если точного нет, запомним любой ≤ k как запасной вариант
+            if (!fallback && isSolvableToward(g, color, k, R, C, simulateFlood)) {
+                fallback = { target: color, exact: false };
+            }
+        }
+        return fallback; // может быть null, если за ≤ k не решается ни к одной цели
+    }
+
+    function majorityColor(g) {
+        const freq = new Map();
+        for (const v of g.flat()) if (v !== BLOCKER) freq.set(v, (freq.get(v) || 0) + 1);
+        let best = -1, color = 0;
+        for (const [k, v] of freq) if (v > best) { best = v; color = k; }
+        return color;
+    }
+
+    // Greedy solvability check — try to solve in <= maxDepth picking moves that grow target the most
+    function isSolvableGreedy(start, target, maxDepth, R, C, simulateFlood) {
+        let state = start.map(r => r.slice());
+        for (let depth = 0; depth < maxDepth; depth++) {
+            if (isUniformTo(state, target)) return true;
+            let bestGain = -1, bestNext = null;
+            const seeds = regionSeeds(state, R, C);
+            for (const { r, c } of seeds) {
+                const base = state[r][c];
+                if (base === BLOCKER) continue;
+                for (let color = 0; color < PALETTE.length; color++) {
+                    if (color === base) continue;
+                    const { grid: ng } = simulateFlood(state, r, c, color, R, C);
+                    if (serialize(ng) === serialize(state)) continue;
+                    const gain = connectedSize(ng, target, R, C);
+                    if (gain > bestGain) {
+                        bestGain = gain;
+                        bestNext = ng;
+                    }
+                }
+            }
+            if (!bestNext) break;
+            state = bestNext;
+        }
+        return isUniformTo(state, target);
     }
 
 
@@ -279,9 +339,12 @@ export default function App() {
         const tryOnce = () => {
             attempts++;
             const g = randomGrid(diff, R, C);
-            const goal = majorityColorOfGrid(g);
 
-            if (isSolvableToward(g, goal, k, R, C, simulateFlood)) {
+            // выбираем такой целевой цвет, чтобы задача решалась в выбранные шаги
+            const pick = pickTargetForBoard(g, k, R, C, simulateFlood);
+
+            if (pick) {
+                const goal = pick.target; // это и есть «последний цвет результата»
                 setSeedGrid(g.map(r => r.slice()));
                 setGrid(g);
                 setGoalColor(goal);
@@ -296,19 +359,9 @@ export default function App() {
             }
 
             if (attempts < MAX_ATTEMPTS) {
-                // уступаем потоку рендера, чтобы не «висеть»
-                setTimeout(tryOnce, 0);
+                setTimeout(tryOnce, 0); // не блокируем UI
             } else {
-                // fallback — очень редко; всё равно стартуем игру
-                setSeedGrid(g.map(r => r.slice()));
-                setGrid(g);
-                setGoalColor(goal);
-                setMovesLeft(k);
-                setIsWon(false);
-                setSelectedColorIdx(null);
-                setOrigin([Math.floor(R/2), Math.floor(C/2)]);
-                setChangedThisMove(new Set());
-                setWaveSeed(s => s + 1);
+                // не нашли подходящую — просто пробуем заново с новыми параметрами
                 setIsGenerating(false);
             }
         };
@@ -442,3 +495,4 @@ export default function App() {
         </div>
     );
 }
+
