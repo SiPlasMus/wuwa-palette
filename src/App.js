@@ -1,17 +1,9 @@
 // App.jsx — Overflowing Palette (React / CRA)
-// - Constructive generator: always solvable in k steps (k per difficulty)
-// - Goal color is chosen automatically per puzzle (random); UI shows it
-// - Async generation to avoid UI freeze
-// - Flip animation only for changed tiles
-// - Rows/Cols inputs, Difficulty, Retry/New Game, goal text
-
 import React, { useEffect, useMemo, useState } from "react";
 import "./App.css";
 
-const MOVES_BY_DIFF = { easy: 3, medium: 4, hard: 5 };
+const MOVES_BY_DIFF = { easy: 4, medium: 5, hard: 6 };
 const BLOCKER = -1;
-const MAX_ATTEMPTS = 250; // сколько раз пробуем сгенерить и проверить
-
 
 const PALETTE = [
     { id: 1, name: "blue",   hex: "#3E82C4" },
@@ -21,21 +13,7 @@ const PALETTE = [
 ];
 
 export default function App() {
-
-    const colors = ['blue', 'red', 'yellow', 'green'];
-
-    function generateBoard(rows, cols) {
-        const board = [];
-        for (let r = 0; r < rows; r++) {
-            const row = [];
-            for (let c = 0; c < cols; c++) {
-                const randomColor = colors[Math.floor(Math.random() * colors.length)];
-                row.push(randomColor);
-            }
-            board.push(row);
-        }
-        return board;
-    }
+    const posId = (r, c, C) => r * C + c;
 
     // size
     const [rows, setRows] = useState(8);
@@ -61,9 +39,7 @@ export default function App() {
     // init
     useEffect(() => { newGame(difficulty, rows, cols); }, []); // on mount
 
-    // helpers
-    const insideIdx = (r,c,R,C) => r>=0 && r<R && c>=0 && c<C;
-
+    // --- helpers ---
     function isUniformTo(g, color) {
         for (const v of g.flat()) if (v !== BLOCKER && v !== color) return false;
         return true;
@@ -75,74 +51,34 @@ export default function App() {
         return dm;
     }
 
-    // flood + track changed cells
-    function simulateFlood(g, sr, sc, targetIdx, R, C){
-        const ng = g.map(row=>row.slice());
+    // flood + track changed cells (fast queue, numeric ids)
+    function simulateFlood(g, sr, sc, targetIdx, R, C) {
+        const base = g[sr][sc];
+        if (base === BLOCKER || base === targetIdx) return { grid: g, changed: new Set() };
+
+        const ng = g.map(r => r.slice());
         const changed = new Set();
-        if (ng[sr][sc]===BLOCKER) return {grid:ng, changed};
-        const base = ng[sr][sc]; if (base===targetIdx) return {grid:ng, changed};
-        const vis = Array.from({length:R},()=>Array(C).fill(false));
-        const q=[[sr,sc]];
-        while(q.length){
-            const [r,c]=q.shift();
-            if (!insideIdx(r,c,R,C) || vis[r][c] || ng[r][c]===BLOCKER || ng[r][c]!==base) continue;
-            vis[r][c]=true; ng[r][c]=targetIdx; changed.add(`${r},${c}`);
-            q.push([r-1,c],[r+1,c],[r,c-1],[r,c+1]);
+
+        const q = new Array(R * C);
+        let qi = 0, qh = 0;
+        q[qi++] = sr; q[qi++] = sc;
+
+        while (qh < qi) {
+            const r = q[qh++], c = q[qh++];
+            if (r < 0 || r >= R || c < 0 || c >= C) continue;
+            if (ng[r][c] !== base) continue;
+            ng[r][c] = targetIdx;
+            changed.add(posId(r, c, C));
+
+            q[qi++] = r - 1; q[qi++] = c;
+            q[qi++] = r + 1; q[qi++] = c;
+            q[qi++] = r;     q[qi++] = c - 1;
+            q[qi++] = r;     q[qi++] = c + 1;
         }
-        return {grid:ng, changed};
+        return { grid: ng, changed };
     }
 
-    function gridsEqual(a,b){
-        if (!a.length || !b.length) return false;
-        for (let r=0;r<a.length;r++) for (let c=0;c<a[0].length;c++) if (a[r][c]!==b[r][c]) return false;
-        return true;
-    }
-
-    // -------- Constructive generator (guaranteed ≤ k steps) --------
-    // idea: pick a random TARGET; start from a uniform TARGET board; (Hard) add blockers;
-    // then perform k reverse-steps: choose origin + non-TARGET color and flood to that color.
-    // The resulting puzzle is solvable in k by replaying the same origins to TARGET.
-    function generatePuzzleConstructive(diff, R, C, k) {
-        const TARGET = (Math.random() * PALETTE.length) | 0; // automatic random goal
-
-        // Start uniform target
-        let g = Array.from({ length: R }, () =>
-            Array.from({ length: C }, () => Math.floor(Math.random() * PALETTE.length))
-        );
-        // Hard: sprinkle blockers first so reverse steps respect them
-        const blockersPct = diff === "hard" ? 0.08 : 0;
-        if (blockersPct > 0) {
-            for (let r = 0; r < R; r++) {
-                for (let c = 0; c < C; c++) {
-                    if (Math.random() < blockersPct) g[r][c] = BLOCKER;
-                }
-            }
-        }
-
-        // pick k origins (avoid blockers)
-        const origins = [];
-        for (let i=0;i<k;i++){
-            let r=0,c=0,tries=0;
-            do { r=(Math.random()*R)|0; c=(Math.random()*C)|0; } while (g[r][c]===BLOCKER && tries++<200);
-            if (g[r][c]===BLOCKER) { r=Math.floor(R/2); c=Math.floor(C/2); } // fallback
-            origins.push([r,c]);
-        }
-
-        // push away from TARGET k times
-        for (let i=0;i<k;i++){
-            const [r,c] = origins[i];
-            let color = TARGET;
-            for (let guard=0; guard<20 && color===TARGET; guard++){
-                color = (Math.random()*PALETTE.length)|0;
-            }
-            const res = simulateFlood(g, r, c, color, R, C);
-            g = res.grid;
-        }
-
-        return { grid: g, goal: TARGET };
-    }
-
-    // Случайная доска с лёгким уклоном в один цвет (повышает решаемость)
+    // random grid with bias (WuWa feel) + blockers on hard
     function randomGrid(diff, R, C) {
         const blockersPct = diff === "hard" ? 0.08 : 0;
         const biasColor = (Math.random() * PALETTE.length) | 0;
@@ -156,7 +92,7 @@ export default function App() {
             })
         );
 
-        // центр не должен быть блокером (приятнее играть)
+        // center cannot be blocker
         const cr = Math.floor(R / 2), cc = Math.floor(C / 2);
         if (g[cr][cc] === BLOCKER) g[cr][cc] = biasColor;
         return g;
@@ -170,7 +106,7 @@ export default function App() {
         return color;
     }
 
-// центры компонент — кандидаты-«ориджины» для клика
+    // centers of connected regions (as click seeds)
     function regionSeeds(g, R, C) {
         const seeds = [];
         const seen = Array.from({ length: R }, () => Array(C).fill(false));
@@ -211,99 +147,7 @@ export default function App() {
         return best;
     }
 
-// нижняя оценка: количество компонент «нецелевого» цвета
-    function nonTargetComponents(g, target, R, C) {
-        const seen = Array.from({ length: R }, () => Array(C).fill(false));
-        let comps = 0;
-        for (let r=0;r<R;r++) for (let c=0;c<C;c++) {
-            if (seen[r][c] || g[r][c] === BLOCKER || g[r][c] === target) continue;
-            const clr = g[r][c]; comps++;
-            const q = [[r,c]]; seen[r][c] = true;
-            while (q.length) {
-                const [rr,cc] = q.shift();
-                for (const [nr,nc] of [[rr-1,cc],[rr+1,cc],[rr,cc-1],[rr,cc+1]]) {
-                    if (nr<0||nr>=R||nc<0||nc>=C) continue;
-                    if (seen[nr][nc]) continue;
-                    if (g[nr][nc] === clr) { seen[nr][nc] = true; q.push([nr,nc]); }
-                }
-            }
-        }
-        return comps;
-    }
-
-    function serialize(g){ return g.map(r=>r.join(",")).join("|"); }
-
-// Поиск решения ≤ k ходов (итеративный DFS с отсечениями)
-    function isSolvableToward(start, target, maxDepth, R, C, simulateFlood) {
-        const seen = new Set();
-
-        function dfs(state, depth) {
-            if (depth > maxDepth) return false;
-            if (isUniformTo(state, target)) return true;
-
-            const key = serialize(state) + "|" + depth;
-            if (seen.has(key)) return false;
-            seen.add(key);
-
-            const seeds = regionSeeds(state, R, C);
-            const moves = [];
-            for (const { r, c } of seeds) {
-                const base = state[r][c];
-                if (base === BLOCKER) continue;
-                for (let color = 0; color < PALETTE.length; color++) {
-                    if (color === base) continue;
-                    const { grid: ng } = simulateFlood(state, r, c, color, R, C);
-                    if (serialize(ng) === serialize(state)) continue;
-
-                    // score: size of largest target blob (greedy guidance)
-                    const gain = connectedSize(ng, target, R, C);
-                    moves.push({ ng, gain });
-                }
-            }
-
-            // try only the best few moves to cap branching
-            moves.sort((a, b) => b.gain - a.gain);
-            for (const m of moves.slice(0, 16)) {
-                if (dfs(m.ng, depth + 1)) return true;
-            }
-            return false;
-        }
-
-        return dfs(start, 0);
-    }
-
-
-    function isSolvableExact(start, target, k, R, C, simulateFlood) {
-        if (!isSolvableToward(start, target, k, R, C, simulateFlood)) return false;
-        if (k > 0 && isSolvableToward(start, target, k - 1, R, C, simulateFlood)) return false;
-        return true;
-    }
-
-
-    function pickTargetForBoard(g, k, R, C, simulateFlood) {
-        let fallback = null;
-        for (let color = 0; color < PALETTE.length; color++) {
-            // сначала пытаемся найти ровно k
-            if (isSolvableExact(g, color, k, R, C, simulateFlood)) {
-                return { target: color, exact: true };
-            }
-            // если точного нет, запомним любой ≤ k как запасной вариант
-            if (!fallback && isSolvableToward(g, color, k, R, C, simulateFlood)) {
-                fallback = { target: color, exact: false };
-            }
-        }
-        return fallback; // может быть null, если за ≤ k не решается ни к одной цели
-    }
-
-    function majorityColor(g) {
-        const freq = new Map();
-        for (const v of g.flat()) if (v !== BLOCKER) freq.set(v, (freq.get(v) || 0) + 1);
-        let best = -1, color = 0;
-        for (const [k, v] of freq) if (v > best) { best = v; color = k; }
-        return color;
-    }
-
-    // Greedy solvability check — try to solve in <= maxDepth picking moves that grow target the most
+    // cheap greedy check (<= k moves)
     function isSolvableGreedy(start, target, maxDepth, R, C, simulateFlood) {
         let state = start.map(r => r.slice());
         for (let depth = 0; depth < maxDepth; depth++) {
@@ -316,12 +160,10 @@ export default function App() {
                 for (let color = 0; color < PALETTE.length; color++) {
                     if (color === base) continue;
                     const { grid: ng } = simulateFlood(state, r, c, color, R, C);
-                    if (serialize(ng) === serialize(state)) continue;
+                    // skip no-op
+                    if (ng === state) continue;
                     const gain = connectedSize(ng, target, R, C);
-                    if (gain > bestGain) {
-                        bestGain = gain;
-                        bestNext = ng;
-                    }
+                    if (gain > bestGain) { bestGain = gain; bestNext = ng; }
                 }
             }
             if (!bestNext) break;
@@ -329,7 +171,6 @@ export default function App() {
         }
         return isUniformTo(state, target);
     }
-
 
     function newGame(diff = difficulty, R = rows, C = cols) {
         setIsGenerating(true);
@@ -339,30 +180,24 @@ export default function App() {
         const tryOnce = () => {
             attempts++;
             const g = randomGrid(diff, R, C);
+            const majority = majorityColorOfGrid(g);
+            const ok = isSolvableGreedy(g, majority, k, R, C, simulateFlood);
 
-            // выбираем такой целевой цвет, чтобы задача решалась в выбранные шаги
-            const pick = pickTargetForBoard(g, k, R, C, simulateFlood);
-
-            if (pick) {
-                const goal = pick.target; // это и есть «последний цвет результата»
-                setSeedGrid(g.map(r => r.slice()));
-                setGrid(g);
-                setGoalColor(goal);
-                setMovesLeft(k);
-                setIsWon(false);
-                setSelectedColorIdx(null);
-                setOrigin([Math.floor(R/2), Math.floor(C/2)]);
-                setChangedThisMove(new Set());
-                setWaveSeed(s => s + 1);
-                setIsGenerating(false);
-                return;
-            }
-
-            if (attempts < MAX_ATTEMPTS) {
-                setTimeout(tryOnce, 0); // не блокируем UI
+            if (ok || attempts >= 120) {
+                React.startTransition?.(() => {
+                    setSeedGrid(g.map(r => r.slice()));
+                    setGrid(g);
+                    setGoalColor(majority);
+                    setMovesLeft(k);
+                    setIsWon(false);
+                    setSelectedColorIdx(null);
+                    setOrigin([Math.floor(R/2), Math.floor(C/2)]);
+                    setChangedThisMove(new Set());
+                    setWaveSeed(s => s + 1);
+                    setIsGenerating(false);
+                });
             } else {
-                // не нашли подходящую — просто пробуем заново с новыми параметрами
-                setIsGenerating(false);
+                setTimeout(tryOnce, 0);
             }
         };
 
@@ -373,17 +208,26 @@ export default function App() {
     const wonNow = useMemo(()=>isUniformTo(grid, goalColor),[grid,goalColor]);
     useEffect(()=>{ if (wonNow && movesLeft>=0) setIsWon(true); },[wonNow,movesLeft]);
 
-    function onCellClick(r,c){
-        if (selectedColorIdx==null || isWon || movesLeft<=0) return;
-        if (grid[r][c]===BLOCKER) return;
+    function onCellClick(r, c) {
+        if (selectedColorIdx == null || isWon || movesLeft <= 0) return;
+        if (grid[r][c] === BLOCKER) return;
+
         const res = simulateFlood(grid, r, c, selectedColorIdx, rows, cols);
-        if (!gridsEqual(res.grid, grid)){
-            setGrid(res.grid);
-            setMovesLeft(m=>m-1);
-            setOrigin([r,c]);
+        if (res.changed.size === 0) return;
+
+        setGrid(res.grid);
+        setMovesLeft(m => {
+            const next = m - 1;
+            setOrigin([r, c]);
             setChangedThisMove(res.changed);
-            setWaveSeed(s=>s+1);
-        }
+            setWaveSeed(s => s + 1);
+
+            if (next === 0 && !isUniformTo(res.grid, goalColor)) {
+                console.log("restarting cause no attemps"); // replace with your toast if needed
+                setTimeout(() => handleRetry(), 300);
+            }
+            return next;
+        });
     }
 
     function handleDiff(e){ const d=e.target.value; setDifficulty(d); newGame(d, rows, cols); }
@@ -396,7 +240,10 @@ export default function App() {
         newGame(difficulty, R, C);
     }
 
-    const dmap = useMemo(()=>distanceMap(origin, rows, cols),[origin, grid, waveSeed, rows, cols]);
+    const dmap = useMemo(
+        () => distanceMap(origin, rows, cols),
+        [origin, rows, cols, waveSeed]
+    );
 
     // -------- render --------
     return (
@@ -412,9 +259,9 @@ export default function App() {
                     <label className="diff">
                         Difficulty
                         <select value={difficulty} onChange={handleDiff}>
-                            <option value="easy">Easy (3 moves)</option>
-                            <option value="medium">Medium (4 moves)</option>
-                            <option value="hard">Hard (5 moves + blockers)</option>
+                            <option value="easy">Easy</option>
+                            <option value="medium">Medium</option>
+                            <option value="hard">Hard (blockers)</option>
                         </select>
                     </label>
 
@@ -444,13 +291,15 @@ export default function App() {
                             <div className="row" key={r}>
                                 {row.map((idx,c)=>{
                                     const key=`${r},${c}`;
-                                    const willFlip = changedThisMove.has(key);
-                                    const delay = willFlip ? dmap[r][c]*120 : 0; // slow wave only on changed
-                                    const isOrigin = origin[0]===r && origin[1]===c;
+                                    const id = posId(r, c, cols);
+                                    const willFlip = changedThisMove.has(id);
+                                    const delay = willFlip ? dmap[r][c] * 90 : 0;
+
                                     const style = {
-                                        background: idx===BLOCKER ? "#0b0b0f" : PALETTE[idx].hex,
+                                        background: idx === BLOCKER ? "#0b0b0f" : PALETTE[idx].hex,
                                         transitionDelay: `${delay}ms`,
                                     };
+                                    const isOrigin = origin[0]===r && origin[1]===c;
                                     return (
                                         <button
                                             key={key}
@@ -489,10 +338,7 @@ export default function App() {
         </span>
             </div>
 
-            {isGenerating && (
-                <div className="overlay">Generating puzzle…</div>
-            )}
+            {isGenerating && (<div className="overlay">Generating puzzle…</div>)}
         </div>
     );
 }
-
