@@ -1,10 +1,9 @@
 // App.jsx — Overflowing Palette (React / CRA)
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import "./App.css";
 
 const MOVES_BY_DIFF = { easy: 4, medium: 5, hard: 6 };
 const BLOCKER = -1;
-
 const PALETTE = [
     { id: 1, name: "blue",   hex: "#3E82C4" },
     { id: 2, name: "red",    hex: "#D04747" },
@@ -12,9 +11,138 @@ const PALETTE = [
     { id: 4, name: "green",  hex: "#3E9E8F" },
 ];
 
-export default function App() {
-    const posId = (r, c, C) => r * C + c;
+// ---------- helpers (module scope = stable, no deps) ----------
+const posId = (r, c, C) => r * C + c;
 
+function isUniformTo(g, color) {
+    for (const v of g.flat()) if (v !== BLOCKER && v !== color) return false;
+    return true;
+}
+
+function distanceMap([sr, sc], R, C){
+    const dm = Array.from({length:R},()=>Array(C).fill(0));
+    for (let r=0;r<R;r++) for (let c=0;c<C;c++) dm[r][c] = Math.abs(sr-r)+Math.abs(sc-c);
+    return dm;
+}
+
+// fast flood + changed set
+function simulateFlood(g, sr, sc, targetIdx, R, C) {
+    const base = g[sr][sc];
+    if (base === BLOCKER || base === targetIdx) return { grid: g, changed: new Set() };
+
+    const ng = g.map(row => row.slice());
+    const changed = new Set();
+
+    const q = new Array(R * C);
+    let qi = 0, qh = 0;
+    q[qi++] = sr; q[qi++] = sc;
+
+    while (qh < qi) {
+        const r = q[qh++], c = q[qh++];
+        if (r < 0 || r >= R || c < 0 || c >= C) continue;
+        if (ng[r][c] !== base) continue;
+        ng[r][c] = targetIdx;
+        changed.add(posId(r, c, C));
+
+        q[qi++] = r - 1; q[qi++] = c;
+        q[qi++] = r + 1; q[qi++] = c;
+        q[qi++] = r;     q[qi++] = c - 1;
+        q[qi++] = r;     q[qi++] = c + 1;
+    }
+    return { grid: ng, changed };
+}
+
+function randomGrid(diff, R, C) {
+    const blockersPct = diff === "hard" ? 0.08 : 0;
+    const biasColor = (Math.random() * PALETTE.length) | 0;
+    const biasPct = 0.62;
+
+    const g = Array.from({ length: R }, () =>
+        Array.from({ length: C }, () => {
+            if (Math.random() < blockersPct) return BLOCKER;
+            if (Math.random() < biasPct) return biasColor;
+            return (Math.random() * PALETTE.length) | 0;
+        })
+    );
+
+    const cr = (R/2)|0, cc = (C/2)|0;
+    if (g[cr][cc] === BLOCKER) g[cr][cc] = biasColor;
+    return g;
+}
+
+function majorityColorOfGrid(g) {
+    const freq = new Map();
+    for (const v of g.flat()) if (v !== BLOCKER) freq.set(v, (freq.get(v) || 0) + 1);
+    let best = -1, color = 0;
+    for (const [k, v] of freq) if (v > best) { best = v; color = k; }
+    return color;
+}
+
+function regionSeeds(g, R, C) {
+    const seeds = [];
+    const seen = Array.from({ length: R }, () => Array(C).fill(false));
+    for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+        if (seen[r][c] || g[r][c] === BLOCKER) continue;
+        const color = g[r][c];
+        const q = [[r, c]]; seen[r][c] = true;
+        let cnt = 0, sr = 0, sc = 0;
+        while (q.length) {
+            const [rr, cc] = q.shift(); cnt++; sr += rr; sc += cc;
+            for (const [nr, nc] of [[rr-1,cc],[rr+1,cc],[rr,cc-1],[rr,cc+1]]) {
+                if (nr<0||nr>=R||nc<0||nc>=C) continue;
+                if (seen[nr][nc]) continue;
+                if (g[nr][nc] === color) { seen[nr][nc] = true; q.push([nr, nc]); }
+            }
+        }
+        seeds.push({ r: Math.round(sr / cnt), c: Math.round(sc / cnt) });
+    }
+    return seeds;
+}
+
+function connectedSize(g, color, R, C) {
+    const seen = Array.from({ length: R }, () => Array(C).fill(false));
+    let best = 0;
+    for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+        if (seen[r][c] || g[r][c] !== color) continue;
+        let cnt = 0; const q = [[r, c]]; seen[r][c] = true;
+        while (q.length) {
+            const [rr, cc] = q.shift(); cnt++;
+            for (const [nr,nc] of [[rr-1,cc],[rr+1,cc],[rr,cc-1],[rr,cc+1]]) {
+                if (nr<0||nr>=R||nc<0||nc>=C) continue;
+                if (seen[nr][nc]) continue;
+                if (g[nr][nc] === color) { seen[nr][nc] = true; q.push([nr,nc]); }
+            }
+        }
+        if (cnt > best) best = cnt;
+    }
+    return best;
+}
+
+function isSolvableGreedy(start, target, maxDepth, R, C) {
+    let state = start.map(r => r.slice());
+    for (let depth = 0; depth < maxDepth; depth++) {
+        if (isUniformTo(state, target)) return true;
+        let bestGain = -1, bestNext = null;
+        const seeds = regionSeeds(state, R, C);
+        for (const { r, c } of seeds) {
+            const base = state[r][c];
+            if (base === BLOCKER) continue;
+            for (let color = 0; color < PALETTE.length; color++) {
+                if (color === base) continue;
+                const { grid: ng } = simulateFlood(state, r, c, color, R, C);
+                if (ng === state) continue;
+                const gain = connectedSize(ng, target, R, C);
+                if (gain > bestGain) { bestGain = gain; bestNext = ng; }
+            }
+        }
+        if (!bestNext) break;
+        state = bestNext;
+    }
+    return isUniformTo(state, target);
+}
+
+// ---------------- component ----------------
+export default function App() {
     // size
     const [rows, setRows] = useState(8);
     const [cols, setCols] = useState(10);
@@ -36,143 +164,8 @@ export default function App() {
     // async generation
     const [isGenerating, setIsGenerating] = useState(false);
 
-    // init
-    useEffect(() => { newGame(difficulty, rows, cols); }, []); // on mount
-
-    // --- helpers ---
-    function isUniformTo(g, color) {
-        for (const v of g.flat()) if (v !== BLOCKER && v !== color) return false;
-        return true;
-    }
-
-    function distanceMap([sr, sc], R, C){
-        const dm = Array.from({length:R},()=>Array(C).fill(0));
-        for (let r=0;r<R;r++) for (let c=0;c<C;c++) dm[r][c] = Math.abs(sr-r)+Math.abs(sc-c);
-        return dm;
-    }
-
-    // flood + track changed cells (fast queue, numeric ids)
-    function simulateFlood(g, sr, sc, targetIdx, R, C) {
-        const base = g[sr][sc];
-        if (base === BLOCKER || base === targetIdx) return { grid: g, changed: new Set() };
-
-        const ng = g.map(r => r.slice());
-        const changed = new Set();
-
-        const q = new Array(R * C);
-        let qi = 0, qh = 0;
-        q[qi++] = sr; q[qi++] = sc;
-
-        while (qh < qi) {
-            const r = q[qh++], c = q[qh++];
-            if (r < 0 || r >= R || c < 0 || c >= C) continue;
-            if (ng[r][c] !== base) continue;
-            ng[r][c] = targetIdx;
-            changed.add(posId(r, c, C));
-
-            q[qi++] = r - 1; q[qi++] = c;
-            q[qi++] = r + 1; q[qi++] = c;
-            q[qi++] = r;     q[qi++] = c - 1;
-            q[qi++] = r;     q[qi++] = c + 1;
-        }
-        return { grid: ng, changed };
-    }
-
-    // random grid with bias (WuWa feel) + blockers on hard
-    function randomGrid(diff, R, C) {
-        const blockersPct = diff === "hard" ? 0.08 : 0;
-        const biasColor = (Math.random() * PALETTE.length) | 0;
-        const biasPct = 0.62;
-
-        const g = Array.from({ length: R }, () =>
-            Array.from({ length: C }, () => {
-                if (Math.random() < blockersPct) return BLOCKER;
-                if (Math.random() < biasPct) return biasColor;
-                return (Math.random() * PALETTE.length) | 0;
-            })
-        );
-
-        // center cannot be blocker
-        const cr = Math.floor(R / 2), cc = Math.floor(C / 2);
-        if (g[cr][cc] === BLOCKER) g[cr][cc] = biasColor;
-        return g;
-    }
-
-    function majorityColorOfGrid(g) {
-        const freq = new Map();
-        for (const v of g.flat()) if (v !== BLOCKER) freq.set(v, (freq.get(v) || 0) + 1);
-        let best = -1, color = 0;
-        for (const [k, v] of freq) if (v > best) { best = v; color = k; }
-        return color;
-    }
-
-    // centers of connected regions (as click seeds)
-    function regionSeeds(g, R, C) {
-        const seeds = [];
-        const seen = Array.from({ length: R }, () => Array(C).fill(false));
-        for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
-            if (seen[r][c] || g[r][c] === BLOCKER) continue;
-            const color = g[r][c];
-            const q = [[r, c]]; seen[r][c] = true;
-            let cnt = 0, sr = 0, sc = 0;
-            while (q.length) {
-                const [rr, cc] = q.shift(); cnt++; sr += rr; sc += cc;
-                for (const [nr, nc] of [[rr-1,cc],[rr+1,cc],[rr,cc-1],[rr,cc+1]]) {
-                    if (nr<0||nr>=R||nc<0||nc>=C) continue;
-                    if (seen[nr][nc]) continue;
-                    if (g[nr][nc] === color) { seen[nr][nc] = true; q.push([nr, nc]); }
-                }
-            }
-            seeds.push({ r: Math.round(sr / cnt), c: Math.round(sc / cnt) });
-        }
-        return seeds;
-    }
-
-    function connectedSize(g, color, R, C) {
-        const seen = Array.from({ length: R }, () => Array(C).fill(false));
-        let best = 0;
-        for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
-            if (seen[r][c] || g[r][c] !== color) continue;
-            let cnt = 0; const q = [[r, c]]; seen[r][c] = true;
-            while (q.length) {
-                const [rr, cc] = q.shift(); cnt++;
-                for (const [nr,nc] of [[rr-1,cc],[rr+1,cc],[rr,cc-1],[rr,cc+1]]) {
-                    if (nr<0||nr>=R||nc<0||nc>=C) continue;
-                    if (seen[nr][nc]) continue;
-                    if (g[nr][nc] === color) { seen[nr][nc] = true; q.push([nr,nc]); }
-                }
-            }
-            if (cnt > best) best = cnt;
-        }
-        return best;
-    }
-
-    // cheap greedy check (<= k moves)
-    function isSolvableGreedy(start, target, maxDepth, R, C, simulateFlood) {
-        let state = start.map(r => r.slice());
-        for (let depth = 0; depth < maxDepth; depth++) {
-            if (isUniformTo(state, target)) return true;
-            let bestGain = -1, bestNext = null;
-            const seeds = regionSeeds(state, R, C);
-            for (const { r, c } of seeds) {
-                const base = state[r][c];
-                if (base === BLOCKER) continue;
-                for (let color = 0; color < PALETTE.length; color++) {
-                    if (color === base) continue;
-                    const { grid: ng } = simulateFlood(state, r, c, color, R, C);
-                    // skip no-op
-                    if (ng === state) continue;
-                    const gain = connectedSize(ng, target, R, C);
-                    if (gain > bestGain) { bestGain = gain; bestNext = ng; }
-                }
-            }
-            if (!bestNext) break;
-            state = bestNext;
-        }
-        return isUniformTo(state, target);
-    }
-
-    function newGame(diff = difficulty, R = rows, C = cols) {
+    // newGame is stable; safe to depend on
+    const newGame = useCallback((diff = difficulty, R = rows, C = cols) => {
         setIsGenerating(true);
         const k = MOVES_BY_DIFF[diff];
         let attempts = 0;
@@ -181,7 +174,7 @@ export default function App() {
             attempts++;
             const g = randomGrid(diff, R, C);
             const majority = majorityColorOfGrid(g);
-            const ok = isSolvableGreedy(g, majority, k, R, C, simulateFlood);
+            const ok = isSolvableGreedy(g, majority, k, R, C);
 
             if (ok || attempts >= 120) {
                 React.startTransition?.(() => {
@@ -202,7 +195,10 @@ export default function App() {
         };
 
         setTimeout(tryOnce, 0);
-    }
+    }, [difficulty, rows, cols]);
+
+    // on mount
+    useEffect(() => { newGame(); }, [newGame]);
 
     // -------- gameplay --------
     const wonNow = useMemo(()=>isUniformTo(grid, goalColor),[grid,goalColor]);
@@ -223,7 +219,7 @@ export default function App() {
             setWaveSeed(s => s + 1);
 
             if (next === 0 && !isUniformTo(res.grid, goalColor)) {
-                console.log("restarting cause no attemps"); // replace with your toast if needed
+                console.log("restarting cause no attemps");
                 setTimeout(() => handleRetry(), 300);
             }
             return next;
@@ -240,10 +236,11 @@ export default function App() {
         newGame(difficulty, R, C);
     }
 
-    const dmap = useMemo(
-        () => distanceMap(origin, rows, cols),
-        [origin, rows, cols, waveSeed]
-    );
+    const dmap = useMemo(() => {
+        // touch waveSeed so ESLint knows it's used
+        void waveSeed;
+        return distanceMap(origin, rows, cols);
+    }, [origin, rows, cols, waveSeed]);
 
     // -------- render --------
     return (
