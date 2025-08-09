@@ -48,6 +48,13 @@ body{margin:0;background:radial-gradient(80% 80% at 100% 0%, #0e0e10 0%, #0a0a0c
 
 .goalbar{margin-top:14px;color:#ddd;display:flex;align-items:center;gap:6px;font-weight:600}
 .goalbar .chev{opacity:.9}
+.overlay {
+    position: fixed; inset: 0;
+    display: grid; place-items: center;
+    background: rgba(0,0,0,.35);
+    font-weight: 700; letter-spacing: .3px;
+}
+
 
 @media (max-width: 900px){
     .cell{width:44px;height:44px}
